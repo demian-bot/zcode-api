@@ -127,7 +127,15 @@ export async function sendOrderedUpstreamRequest(req: OrderedUpstreamRequest): P
     socket.once("error", fail);
     socket.once("end", () => {
       if (!responseStarted) {
-        reject(new Error("upstream closed before sending response headers"));
+        // Codex review (PR #35): a clean FIN after the request was written
+        // is still a post-write failure — the upstream may have processed
+        // the LLM call, so the connect-retry loop must skip the resend.
+        // Flag it the same way fail() flags post-write errors.
+        const err = new Error("upstream closed before sending response headers");
+        if (postWrite) {
+          try { (err as { postWrite?: boolean }).postWrite = true; } catch {}
+        }
+        reject(err);
         return;
       }
       finish();

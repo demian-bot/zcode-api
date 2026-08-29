@@ -323,6 +323,40 @@ describe("sendOrderedUpstreamRequest", () => {
       body: "{}",
     })).rejects.toThrow(/Invalid upstream header name/);
   });
+
+  it("flags a clean pre-header close as a postWrite failure (PR #35 Codex review)", async () => {
+    // Server accepts the full request, then closes with a clean FIN without
+    // sending response headers. The upstream may have processed the LLM call,
+    // so the rejection must carry postWrite: true — the connect-retry loop
+    // skips flagged errors to avoid resending a side-effecting request.
+    const server = createServer((socket) => {
+      socket.on("data", () => {
+        // Full request head+body received — close cleanly, no response.
+        socket.end();
+        server.close();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+
+    let caught: (Error & { postWrite?: boolean }) | null = null;
+    try {
+      await sendOrderedUpstreamRequest({
+        url: `http://127.0.0.1:${(address as { port: number }).port}/v1/messages`,
+        method: "POST",
+        headers: [["x-api-key", "testkey.testsecret"]],
+        body: "{}",
+      });
+    } catch (err) {
+      caught = err as Error & { postWrite?: boolean };
+    }
+    server.close();
+
+    expect(caught).not.toBeNull();
+    expect(caught!.message).toMatch(/closed before sending response headers/);
+    expect(caught!.postWrite).toBe(true);
+  });
 });
 describe("buildUpstreamHeaderPairs — accept-encoding forwarding", () => {
   it("forwards the client's accept-encoding when present (e.g. identity)", () => {
